@@ -58,6 +58,26 @@ interface ScanCandidate {
   rug_ratio?: number;
   launchpad_platform?: string;
   open_timestamp?: number;
+  cookin?: CookinData;
+}
+
+interface CookinData {
+  score: number;
+  conviction_score: number;
+  bundle_pct: number;
+  alpha_hands_pct: number;
+  diamond_hands_pct: number;
+  chart_nukers_pct: number;
+  jeets_pct: number;
+  dirty_pct: number;
+  pump_conditions_met: number;
+  dump_conditions_met: number;
+  kols_in_count: number;
+  holder_count: number;
+  bundle_count: number;
+  top10_pct: number;
+  dex_paid: boolean;
+  has_migrated: boolean;
 }
 
 interface ScanResult {
@@ -101,6 +121,17 @@ const CONFIG = {
 
   // GMGN trending interval: 1m | 5m | 1h | 6h | 24h
   INTERVAL: process.env.INTERVAL ?? "5m",
+
+  // Cookin.fun enrichment (optional)
+  COOKIN_API_KEY: process.env.COOKIN_API_KEY ?? "",
+  COOKIN_BASE_URL: process.env.COOKIN_BASE_URL ?? "https://api.cookin.fun",
+  COOKIN_MIN_SCORE: Number(process.env.COOKIN_MIN_SCORE ?? 3),
+  COOKIN_MAX_DUMP: Number(process.env.COOKIN_MAX_DUMP_CONDITIONS ?? 15),
+  COOKIN_MAX_BUNDLE_PCT: Number(process.env.COOKIN_MAX_BUNDLE_PCT ?? 60),
+  COOKIN_REQUIRE_DEX_PAID: process.env.COOKIN_REQUIRE_DEX_PAID !== "false",
+
+  // Cookin.fun enrichment timeout per token (ms)
+  COOKIN_TIMEOUT: Number(process.env.COOKIN_TIMEOUT ?? 8000),
 } as const;
 
 // ── GMGN API ───────────────────────────────────────────────────────────────
@@ -203,6 +234,10 @@ function formatResult(result: ScanResult): string {
       const meta = [];
       if (c.launchpad_platform) meta.push(c.launchpad_platform);
       if (c.rug_ratio !== undefined && c.rug_ratio > 0) meta.push(`rug:${c.rug_ratio.toFixed(2)}`);
+      if (c.cookin) {
+        meta.push(`🍳S:${c.cookin.score.toFixed(1)} d:${c.cookin.dump_conditions_met} b:${c.cookin.bundle_pct.toFixed(0)}%`);
+        if (c.cookin.kols_in_count > 0) meta.push(`KOL:${c.cookin.kols_in_count}`);
+      }
       lines.push(`║  Liq: $${(c.liquidity / 1000).toFixed(1)}K  MC: $${(c.market_cap / 1000).toFixed(1)}K  ${meta.join(" ")}`);
     }
 
@@ -216,6 +251,68 @@ function formatResult(result: ScanResult): string {
 
   // JSON output
   return JSON.stringify(result, null, 2);
+}
+
+// ── Cookin.fun Enrichment ───────────────────────────────────────────────────
+
+async function cookinSnapshot(mint: string): Promise<CookinData | null> {
+  if (!CONFIG.COOKIN_API_KEY) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CONFIG.COOKIN_TIMEOUT);
+
+  try {
+    const resp = await fetch(`${CONFIG.COOKIN_BASE_URL}/v1/tokens/${mint}`, {
+      headers: { Authorization: `Bearer ${CONFIG.COOKIN_API_KEY}` },
+      signal: controller.signal,
+    });
+    if (!resp.ok) return null;
+
+    const json = await resp.json() as { data?: Record<string, unknown> };
+    const d = json.data ?? {};
+    const score = d.score as Record<string, number> | undefined;
+    const holders = d.holders as Record<string, unknown> | undefined;
+    const bundles = d.bundles as unknown[] | undefined;
+    const signals = d.signals as Record<string, number> | undefined;
+    const status = d.status as Record<string, boolean | null> | undefined;
+    const kols = d.kols as Record<string, unknown> | undefined;
+
+    return {
+      score: score?.value ?? 0,
+      conviction_score: score?.conviction_score ?? 0,
+      bundle_pct: score?.bundle_pct ?? 0,
+      alpha_hands_pct: score?.alpha_hands_pct ?? 0,
+      diamond_hands_pct: score?.diamond_hands_pct ?? 0,
+      chart_nukers_pct: score?.chart_nukers_pct ?? 0,
+      jeets_pct: score?.jeets_pct ?? 0,
+      dirty_pct: score?.dirty_pct ?? 0,
+      pump_conditions_met: signals?.pump_conditions_met ?? 0,
+      dump_conditions_met: signals?.dump_conditions_met ?? 0,
+      kols_in_count: (kols?.count as number) ?? 0,
+      holder_count: (holders?.count as number) ?? 0,
+      bundle_count: bundles?.length ?? 0,
+      top10_pct: (holders?.top_10_pct as number) ?? 0,
+      dex_paid: (status?.dex_paid as boolean) ?? false,
+      has_migrated: (status?.has_migrated as boolean) ?? false,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function passesCookin(c: CookinData): string[] {
+  const reasons: string[] = [];
+  if (c.score < CONFIG.COOKIN_MIN_SCORE)
+    reasons.push(`score ${c.score.toFixed(1)} < ${CONFIG.COOKIN_MIN_SCORE}`);
+  if (c.dump_conditions_met > CONFIG.COOKIN_MAX_DUMP)
+    reasons.push(`dump signals ${c.dump_conditions_met} > ${CONFIG.COOKIN_MAX_DUMP}`);
+  if (c.bundle_pct > CONFIG.COOKIN_MAX_BUNDLE_PCT)
+    reasons.push(`bundle ${c.bundle_pct.toFixed(0)}% > ${CONFIG.COOKIN_MAX_BUNDLE_PCT}%`);
+  if (CONFIG.COOKIN_REQUIRE_DEX_PAID && !c.dex_paid)
+    reasons.push("DEX not paid");
+  return reasons;
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
@@ -242,6 +339,25 @@ async function scan(): Promise<ScanResult> {
   // Sort by volume descending, take top N
   candidates.sort((a, b) => b.volume_5m - a.volume_5m);
   const top = candidates.slice(0, CONFIG.MAX_CANDIDATES);
+
+  // Enrich with Cookin.fun data
+  if (CONFIG.COOKIN_API_KEY) {
+    console.error(`[cookin] enriching ${top.length} candidates...`);
+    for (const c of top) {
+      const data = await cookinSnapshot(c.address);
+      if (data) {
+        c.cookin = data;
+        const failReasons = passesCookin(data);
+        if (failReasons.length > 0) {
+          console.error(`[cookin] ⚠ ${c.symbol} score=${data.score.toFixed(1)} dump=${data.dump_conditions_met} bundle=${data.bundle_pct.toFixed(0)}% — FAILED: ${failReasons.join(", ")}`);
+        } else {
+          console.error(`[cookin] ✓ ${c.symbol} score=${data.score.toFixed(1)} dump=${data.dump_conditions_met} bundle=${data.bundle_pct.toFixed(0)}% kols=${data.kols_in_count}`);
+        }
+      } else {
+        console.error(`[cookin] ⚠ ${c.symbol} — no data (API error or timeout)`);
+      }
+    }
+  }
 
   return {
     timestamp: new Date().toISOString(),

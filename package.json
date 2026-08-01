@@ -1,0 +1,17 @@
+{
+  "name": "gmgn-scanner-for-lp",
+  "version": "1.0.0",
+  "description": "GMGN trending scanner for Uniswap V3 LP opportunities — filters tokens by volume, holders, smart degen count, and wash trading status. Outputs clean JSON for downstream LP execution.",
+  "main": "dist/scanner.js",
+  "scripts": {
+    "build": "tsc",
+    "scan": "node dist/scanner.js",
+    "dev": "tsx src/scanner.ts"
+  },
+  "keywords": ["gmgn", "uniswap", "lp", "scanner", "defi"],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

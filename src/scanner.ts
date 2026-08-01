@@ -86,6 +86,9 @@ const CONFIG = {
   GMGN_API_KEY: process.env.GMGN_API_KEY ?? "gmgn_solbscbaseethmonadtron",
   CHAIN: process.env.CHAIN ?? "robinhood",
 
+  // GMGN CLI chain alias map (e.g. solana → sol)
+  CHAIN_ALIASES: { solana: "sol" } as Record<string, string>,
+
   // Filter params
   MIN_VOLUME: Number(process.env.MIN_VOLUME_USD ?? 200_000),
   MAX_VOLUME: Number(process.env.MAX_VOLUME_USD ?? 1_000_000),
@@ -95,6 +98,9 @@ const CONFIG = {
   MAX_CANDIDATES: Number(process.env.MAX_CANDIDATES ?? 5),
 
   OUTPUT: (process.env.OUTPUT_FORMAT ?? "json") as "json" | "pretty",
+
+  // GMGN trending interval: 1m | 5m | 1h | 6h | 24h
+  INTERVAL: process.env.INTERVAL ?? "5m",
 } as const;
 
 // ── GMGN API ───────────────────────────────────────────────────────────────
@@ -103,13 +109,15 @@ async function gmgnTrending(
   interval = "5m",
   limit = 50
 ): Promise<GmgnRankItem[]> {
+  const gmgnChain = CONFIG.CHAIN_ALIASES[CONFIG.CHAIN] ?? CONFIG.CHAIN;
+
   const args = [
     "market",
     "trending",
     "--chain",
-    CONFIG.CHAIN,
+    gmgnChain,
     "--interval",
-    interval,
+    CONFIG.INTERVAL,
     "--limit",
     String(limit),
     "--order-by",
@@ -192,7 +200,10 @@ function formatResult(result: ScanResult): string {
     for (const c of result.candidates) {
       lines.push(`║  ${c.symbol.padEnd(8)} vol $${(c.volume_5m / 1000).toFixed(0)}K │ h${c.holder_count} │ s${c.smart_degen_count}`);
       lines.push(`║  CA: ${c.address.slice(0, 20)}...`);
-      if (c.liquidity > 0) lines.push(`║  Liq: $${(c.liquidity / 1000).toFixed(1)}K  MC: $${(c.market_cap / 1000).toFixed(1)}K`);
+      const meta = [];
+      if (c.launchpad_platform) meta.push(c.launchpad_platform);
+      if (c.rug_ratio !== undefined && c.rug_ratio > 0) meta.push(`rug:${c.rug_ratio.toFixed(2)}`);
+      lines.push(`║  Liq: $${(c.liquidity / 1000).toFixed(1)}K  MC: $${(c.market_cap / 1000).toFixed(1)}K  ${meta.join(" ")}`);
     }
 
     if (result.candidates.length === 0) {
@@ -210,7 +221,7 @@ function formatResult(result: ScanResult): string {
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function scan(): Promise<ScanResult> {
-  const items = await gmgnTrending("5m", 50);
+  const items = await gmgnTrending(CONFIG.INTERVAL, 50);
 
   const candidates: ScanCandidate[] = [];
   const rejected: FilterRejection[] = [];
